@@ -7,26 +7,21 @@ from flyappy_autonomy_code.flyappy_controller import FlappyAutomation
 def main(args=None):
     rclpy.init(args=args)
 
-    # Inizializziamo le due classi (nodi)
     perception = FlyappyPerception()
     controller = FlappyAutomation()
 
-    # Usiamo un MultiThreadedExecutor per permettere ai callback
-    # di entrambi i nodi di girare in parallelo senza bloccarsi
     executor = MultiThreadedExecutor()
 
-    # Aggiungiamo i nodi all'executor
     executor.add_node(perception)
     executor.add_node(controller)
 
     perception.get_logger().info("Perception node started!")
-    controller.get_logger().info("Controller avviato!")
+    controller.get_logger().info("Control node started!")
 
     try:
-        # Avviamo il loop principale che gestisce entrambi i nodi
         executor.spin()
     except KeyboardInterrupt:
-        perception.get_logger().info("Arresto del sistema richiesto dall'utente...")
+        perception.get_logger().info("Keyboard interrupt request...")
     finally:
         # Pulizia sistematica
         executor.shutdown()

@@ -8,26 +8,23 @@ class FlappyAutomation(Node):
     def __init__(self) -> None:
         super().__init__('controller_node')
 
-        # Time constants
+        # Control constants
         self.FPS: float = 30.0
         self.T: float = 1.0 / self.FPS
         
-        # Dynamics limits
-        self.ACC_LIMIT: List[float] = [3.0, 10.0]
-        self.VEL_LIMIT: float = 10.0
+        # Dynamics limits [X, Y]
+        self.ACC_LIMIT = [3.0, 10.0]
+        self.VEL_LIMIT = 10.0
         
         # Proximity threshold
-        self.TH_PROX_X: float = 0.1
-        self.TH_PROX_Y: float = 0.04
+        self.TH_PROX = [0.1, 0.04]
 
         # Internal state
-        self.bird_pos: List[float] = [0.0, 0.0]
-        self.bird_vel: List[float] = [0.0, 0.0]
-        
-        # List of waypoints (Path)
-        self.path: Dict[int, Dict[str, Any]] = {} 
+        self.pos_bird = [0.0, 0.0]
+        self.vel_bird = [0.0, 0.0]
+        self.path = {} 
 
-        # Publisher & Subscriber
+        # Publishers and Subscribers
         self.pub_acc = self.create_publisher(
             Vector3,
             '/flyappy_acc',
@@ -39,130 +36,122 @@ class FlappyAutomation(Node):
             '/flyappy_vel',
             self.vel_callback,
             10
-        )
-            
-        self.sub_path = self.create_subscription(
-            Point,
+         )
+        
+        self.sub_path = self.create_subscription(Point,
             '/flyappy_path',
             self.path_callback,
             10
         )
 
-        self.get_logger().info("Control node started!")
-        
-    def minimum_braking_distance(self, v: float, a: float) -> float:
-        """Calculates the distance required to come to a full stop"""
-        if a == 0 or v == 0:
-            return 0.0
-        
-        x: float = 0.0
-        v_temp: float = abs(v)
-        # Calculate the number of steps required to stop
-        n: int = int(round(v_temp / (a * self.T)))
-        if n == 0: return 0.0
-        
-        # Correct acceleration for discrete steps
-        a_step: float = v_temp / (self.T * n)
-
-        while v_temp > 0:
-            v_temp -= a_step * self.T
-            x += v_temp * self.T
-        return x
-
+    def vel_callback(self, msg: Vector3) -> None:
+        """Update bird position and trigger path planning logic"""
+        self.vel_bird = [msg.x, msg.y]
+        self.pos_bird[0] += self.vel_bird[0] * self.T
+        self.pos_bird[1] += self.vel_bird[1] * self.T
+        self.path_planner()
+    
     def path_callback(self, msg: Point) -> None:
-        """Receives waypoints and stores them using Z as index"""
+        """Store incoming waypoints using Z coordinate as the index"""
         idx: int = int(msg.z)
         self.path[idx] = {
             'pos': [msg.x, msg.y],
             'reached': False
         }
-
-    def vel_callback(self, msg: Vector3) -> None:
-        """Adjust the drone's position by integrating speed"""
-        self.bird_pos[0] += msg.x * self.T
-        self.bird_pos[1] += msg.y * self.T
-        
-        self.path_planner()
     
-    def path_planner(self) -> None:
-        """Calculates and publishes acceleration commands to reach waypoints"""
-        acc_cmd: Vector3 = Vector3()
+    def get_braking_dist(self, vel: float, acc: float) -> float:
+        """Calculate the distance needed to stop based on current speed and acceleration"""
+        if acc == 0 or vel == 0:
+            return 0.0
         
-        # 1. TARGET IDENTIFICATION
-        target_idx = None
-        # Iterate over waypoints sorted by Z index
+        dist= 0.0
+        vel_temp = abs(vel)
+        n_steps: int = round(vel_temp / (acc * self.T))
+        
+        if n_steps == 0: return 0.0
+        
+        acc_step = vel_temp / (self.T * n_steps)
+        while vel_temp > 0:
+            vel_temp -= acc_step * self.T
+            dist += vel_temp * self.T
+        return dist
+     
+    def get_next_target(self):
+        """Identify the next available waypoint in the path"""
         for i in sorted(self.path.keys()):
-            point: Dict[str, Any] = self.path[i]
+            point = self.path[i]
+            if point['reached']: continue
             
-            # Calculate relative distance between drone and waypoint
-            dist_x: float = point['pos'][0] - self.bird_pos[0]
-            dist_y: float = point['pos'][1] - self.bird_pos[1]
+            dist_x = point['pos'][0] - self.pos_bird[0]
+            dist_y = point['pos'][1] - self.pos_bird[1]
             
-            if not point['reached']:
-                # If within proximity threshold or if the X position has been passed
-                if (abs(dist_x) < self.TH_PROX_X and abs(dist_y) < self.TH_PROX_Y) or \
-                   (point['pos'][0] < self.bird_pos[0]):
+            # Check if current waypoint is reached or passed
+            if (abs(dist_x) < self.TH_PROX[0] and abs(dist_y) < self.TH_PROX[1]) or \
+                (point['pos'][0] < self.pos_bird[0]):
                     point['reached'] = True
                     continue
-                else:
-                    target_idx = i
-                    break
+            return i, point
+        return None, None
+                             
+    def compute_acc_x(self, target_x: float) -> float:
+        """Calculate acceleration/deceleration for the X axis"""
+        dist_x = target_x - self.pos_bird[0]
+        stop_dist = self.get_braking_dist(self.vel_bird[0], self.ACC_LIMIT[0])
+
+        if dist_x < self.TH_PROX[0]:
+            return -self.vel_bird[0] / self.T  # Stabilize on point
+        elif dist_x > stop_dist:
+            # Safe to accelerate towards target
+            acc = self.ACC_LIMIT[0] - 1.5
+            if (self.vel_bird[0] + acc * self.T) > self.VEL_LIMIT:
+                acc = (self.VEL_LIMIT - self.vel_bird[0]) / self.T
+            return acc
+        else:
+            return -self.ACC_LIMIT[0] # Decelerate to avoid overshoot
+
+    def compute_acc_y(self, target_y: float) -> float:
+        """Calculate acceleration for the Y axis using critical braking logic"""
+        dist_y = target_y - self.pos_bird[1]
+        abs_dist_y = abs(dist_y)
         
-        # If there are no future points, maintain a minimum cruise speed for safety
-        if target_idx is None:
-            if self.bird_vel[0] < (self.VEL_LIMIT * 0.5):
+        # Calculate thresholds for switching between acceleration and braking
+        crit_dist = self.get_braking_dist(self.VEL_LIMIT, self.ACC_LIMIT[1]) 
+        actual_brak = self.get_braking_dist(self.vel_bird[1], self.ACC_LIMIT[1])
+
+        if abs_dist_y < self.TH_PROX[1]:
+            return -self.vel_bird[1] / self.T
+        
+        direction = 1.0 if dist_y > 0 else -1.0
+        
+        if abs_dist_y > crit_dist:
+            # Full speed ahead towards the gap center
+            acc = direction * self.ACC_LIMIT[1]
+            if abs(self.vel_bird[1] + acc * self.T) > self.VEL_LIMIT:
+                acc = (direction * self.VEL_LIMIT - self.vel_bird[1]) / self.T
+            return acc
+        elif abs_dist_y <= abs(actual_brak):
+            # Critical braking: counter-thrust to align with the gap
+            acc = -direction * self.ACC_LIMIT[1]
+            if (direction > 0 and (self.vel_bird[1] + acc * self.T) < 0) or \
+               (direction < 0 and (self.vel_bird[1] + acc * self.T) > 0):
+                acc = (0.0 - self.vel_bird[1]) / self.T
+            return acc
+        else:
+            return direction * (self.ACC_LIMIT[1] * 0.5) # Approaching gap
+    
+    def path_planner(self) -> None:
+        """Main planning loop to calculate and publish acceleration commands"""
+        idx, target = self.get_next_target()
+        acc_cmd = Vector3()
+
+        if target is not None:
+            acc_cmd.x = self.compute_acc_x(target['pos'][0])
+            acc_cmd.y = self.compute_acc_y(target['pos'][1])
+            self.get_logger().debug(f"Targeting target [{idx}]")
+        else:
+            # No path left: maintain speed and level flight
+            if self.vel_bird[0] < (self.VEL_LIMIT * 0.5):
                 acc_cmd.x = self.ACC_LIMIT[0] - 1.5
-            else:
-                acc_cmd.x = 0.0
-            acc_cmd.y = -self.bird_vel[1] / self.T # Attempt to stabilize Y at 0
-            self.pub_acc.publish(acc_cmd)
-            return
-
-        target: Dict[str, Any] = self.path[target_idx]
-
-        # 2. X-AXIS LOGIC
-        dist_x = target['pos'][0] - self.bird_pos[0]
-        # Distance required to brake at current speed
-        curr_braking_x: float = self.minimum_braking_distance(self.bird_vel[0], self.ACC_LIMIT[0])
-
-        if dist_x < self.TH_PROX_X:
-            # STOP ZONE: slow down abruptly to stabilize on the point
-            acc_cmd.x = -self.bird_vel[0] / self.T
-        elif dist_x > curr_braking_x:
-            # Enough space: accelerate up to speed limit
-            acc_cmd.x = self.ACC_LIMIT[0] - 1.5
-            if (self.bird_vel[0] + acc_cmd.x * self.T) > self.VEL_LIMIT:
-                acc_cmd.x = (self.VEL_LIMIT - self.bird_vel[0]) / self.T
-        else:
-            # Must start braking to avoid missing the waypoint
-            acc_cmd.x = -self.ACC_LIMIT[0]
-
-
-        # 3. Y-AXIS LOGIC (GAP CENTERING)
-        dist_y: float = target['pos'][1] - self.bird_pos[1]
-        abs_dist_y: float = abs(dist_y)
-        crit_y: float = self.minimum_braking_distance(self.VEL_LIMIT, self.ACC_LIMIT[1])
-        curr_braking_y: float = self.minimum_braking_distance(self.bird_vel[1], self.ACC_LIMIT[1])
-
-        if abs_dist_y < self.TH_PROX_Y:
-            acc_cmd.y = -self.bird_vel[1] / self.T
-        else:
-            direction: float = 1.0 if dist_y > 0 else -1.0
+            acc_cmd.y = -self.vel_bird[1] / self.T
             
-            if abs_dist_y > crit_y:
-                acc_cmd.y = direction * self.ACC_LIMIT[1]
-                if abs(self.bird_vel[1] + acc_cmd.y * self.T) > self.VEL_LIMIT:
-                    acc_cmd.y = (direction * self.VEL_LIMIT - self.bird_vel[1]) / self.T
-            
-            elif abs_dist_y <= abs(curr_braking_y):
-                acc_cmd.y = -direction * self.ACC_LIMIT[1]
-                if (direction > 0 and (self.bird_vel[1] + acc_cmd.y * self.T) < 0) or \
-                   (direction < 0 and (self.bird_vel[1] + acc_cmd.y * self.T) > 0):
-                    acc_cmd.y = (0.0 - self.bird_vel[1]) / self.T
-            else:
-                acc_cmd.y = direction * (self.ACC_LIMIT[1] * 0.5)
-
-        #  4. PUBLISH COMMAND 
         self.pub_acc.publish(acc_cmd)
-        
-        self.get_logger().debug(f"Target [{target_idx}] - DistX: {dist_x:.2f}, DistY: {dist_y:.2f}, Acc: [{acc_cmd.x:.1f}, {acc_cmd.y:.1f}]")

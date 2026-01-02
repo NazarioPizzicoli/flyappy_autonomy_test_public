@@ -1,0 +1,12 @@
+RESULTS:
+
+test 1: 20
+test 2: 25
+test 3: 40
+test 4: 15
+test 5: 20
+test 6: 35
+test 7: 34
+test 8: 10
+test 9: 32
+test 10: 19
